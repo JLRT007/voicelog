@@ -934,48 +934,43 @@ class _VoiceLogHomeState extends State<VoiceLogHome> {
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: widget.store,
-      builder: (context, _) {
-        final pages = [
-          RecordPage(store: widget.store, splitter: _splitter),
-          OverviewPage(store: widget.store),
-          ReportPage(store: widget.store),
-          ProfilePage(store: widget.store),
-        ];
+    final pages = [
+      RecordPage(store: widget.store, splitter: _splitter),
+      OverviewPage(store: widget.store),
+      ReportPage(store: widget.store),
+      ProfilePage(store: widget.store),
+    ];
 
-        return Scaffold(
-          body: pages[_tabIndex],
-          bottomNavigationBar: NavigationBar(
-            height: 72,
-            selectedIndex: _tabIndex,
-            indicatorColor: _brandGreen.withValues(alpha: 0.12),
-            onDestinationSelected: (index) => setState(() => _tabIndex = index),
-            destinations: const [
-              NavigationDestination(
-                icon: Icon(Icons.edit_note_outlined),
-                selectedIcon: Icon(Icons.edit_note),
-                label: '记录',
-              ),
-              NavigationDestination(
-                icon: Icon(Icons.calendar_month_outlined),
-                selectedIcon: Icon(Icons.calendar_month),
-                label: '总览',
-              ),
-              NavigationDestination(
-                icon: Icon(Icons.bar_chart_outlined),
-                selectedIcon: Icon(Icons.bar_chart),
-                label: '周报',
-              ),
-              NavigationDestination(
-                icon: Icon(Icons.person_outline),
-                selectedIcon: Icon(Icons.person),
-                label: '我的',
-              ),
-            ],
+    return Scaffold(
+      body: pages[_tabIndex],
+      bottomNavigationBar: NavigationBar(
+        height: 72,
+        selectedIndex: _tabIndex,
+        indicatorColor: _brandGreen.withValues(alpha: 0.12),
+        onDestinationSelected: (index) => setState(() => _tabIndex = index),
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.edit_note_outlined),
+            selectedIcon: Icon(Icons.edit_note),
+            label: '记录',
           ),
-        );
-      },
+          NavigationDestination(
+            icon: Icon(Icons.calendar_month_outlined),
+            selectedIcon: Icon(Icons.calendar_month),
+            label: '总览',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.bar_chart_outlined),
+            selectedIcon: Icon(Icons.bar_chart),
+            label: '周报',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.person_outline),
+            selectedIcon: Icon(Icons.person),
+            label: '我的',
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1002,12 +997,13 @@ class _RecordPageState extends State<RecordPage> {
   bool _isConsumingVoiceText = false;
   String _recognizedText = '';
   String _speechStatus = '';
-  late Future<TodoWindow> _todoWindowFuture;
+  TodoWindow _todoWindow = const TodoWindow(today: [], tomorrow: []);
+  bool _isTodoWindowLoading = true;
 
   @override
   void initState() {
     super.initState();
-    _todoWindowFuture = widget.store.todosForTodayAndTomorrow();
+    unawaited(_loadTodoWindow(showLoading: true));
     _voice = VoiceRecognitionService();
     _voiceResultSub = _voice.results.listen(_handleVoiceResult);
     _voiceStatusSub = _voice.statuses.listen(_handleVoiceStatus);
@@ -1040,20 +1036,11 @@ class _RecordPageState extends State<RecordPage> {
                 padding: const EdgeInsets.fromLTRB(20, 14, 20, 170),
                 sliver: SliverList.list(
                   children: [
-                    FutureBuilder<TodoWindow>(
-                      future: _todoWindowFuture,
-                      builder: (context, snapshot) {
-                        return _TodayTodoTable(
-                          todoWindow:
-                              snapshot.data ??
-                              const TodoWindow(today: [], tomorrow: []),
-                          isLoading:
-                              snapshot.connectionState ==
-                              ConnectionState.waiting,
-                          onCompletedChanged: _updateTodoCompleted,
-                          onAdd: _showAddTodoDialog,
-                        );
-                      },
+                    _TodayTodoTable(
+                      todoWindow: _todoWindow,
+                      isLoading: _isTodoWindowLoading,
+                      onCompletedChanged: _updateTodoCompleted,
+                      onAdd: _showAddTodoDialog,
                     ),
                     _CategoryChips(
                       selected: _filter,
@@ -1091,18 +1078,24 @@ class _RecordPageState extends State<RecordPage> {
     );
     if (result == null) return;
     await widget.store.addTodo(result);
-    _refreshTodoWindow();
+    await _loadTodoWindow();
   }
 
   Future<void> _updateTodoCompleted(String id, bool completed) async {
     await widget.store.updateTodoCompleted(id, completed);
-    _refreshTodoWindow();
+    await _loadTodoWindow();
   }
 
-  void _refreshTodoWindow() {
+  Future<void> _loadTodoWindow({bool showLoading = false}) async {
+    if (!mounted) return;
+    if (showLoading) {
+      setState(() => _isTodoWindowLoading = true);
+    }
+    final todoWindow = await widget.store.todosForTodayAndTomorrow();
     if (!mounted) return;
     setState(() {
-      _todoWindowFuture = widget.store.todosForTodayAndTomorrow();
+      _todoWindow = todoWindow;
+      _isTodoWindowLoading = false;
     });
   }
 
@@ -1323,7 +1316,7 @@ class _RecordPageState extends State<RecordPage> {
         ),
       );
     }
-    _refreshTodoWindow();
+    await _loadTodoWindow();
   }
 
   ParsedTodoSchedule _scheduleTodoFromDraft(String draftTitle, String source) {
@@ -1533,6 +1526,7 @@ class _TodoDaySection extends StatelessWidget {
           const SizedBox(height: 4),
           ...todos.map((todo) {
             return _TodoTableRow(
+              key: ValueKey(todo.id),
               todo: todo,
               onChanged: (value) => onCompletedChanged(todo.id, value ?? false),
             );
@@ -1581,7 +1575,7 @@ class _TodoHeaderRow extends StatelessWidget {
 }
 
 class _TodoTableRow extends StatefulWidget {
-  const _TodoTableRow({required this.todo, required this.onChanged});
+  const _TodoTableRow({super.key, required this.todo, required this.onChanged});
 
   final DailyTodo todo;
   final ValueChanged<bool?> onChanged;
@@ -2477,52 +2471,57 @@ class _OverviewPageState extends State<OverviewPage> {
 
   @override
   Widget build(BuildContext context) {
-    final selectedTodos = widget.store.todosForDay(_selectedDay);
-    return SafeArea(
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 24, 20, 110),
-        children: [
-          const Text(
-            '任务总览',
-            style: TextStyle(fontSize: 32, fontWeight: FontWeight.w900),
+    return AnimatedBuilder(
+      animation: widget.store,
+      builder: (context, _) {
+        final selectedTodos = widget.store.todosForDay(_selectedDay);
+        return SafeArea(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(20, 24, 20, 110),
+            children: [
+              const Text(
+                '任务总览',
+                style: TextStyle(fontSize: 32, fontWeight: FontWeight.w900),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                '点击日历中的某一天，查看这一天有什么任务待办',
+                style: TextStyle(color: _muted, fontSize: 16),
+              ),
+              const SizedBox(height: 20),
+              _TaskCalendar(
+                visibleMonth: _visibleMonth,
+                selectedDay: _selectedDay,
+                todoCountForDay: (day) => widget.store.todosForDay(day).length,
+                onPreviousMonth: () => setState(() {
+                  _visibleMonth = DateTime(
+                    _visibleMonth.year,
+                    _visibleMonth.month - 1,
+                  );
+                }),
+                onNextMonth: () => setState(() {
+                  _visibleMonth = DateTime(
+                    _visibleMonth.year,
+                    _visibleMonth.month + 1,
+                  );
+                }),
+                onDaySelected: (day) => setState(() {
+                  _selectedDay = DateUtils.dateOnly(day);
+                  _visibleMonth = DateTime(day.year, day.month);
+                }),
+              ),
+              const SizedBox(height: 16),
+              _SelectedDayTodoCard(
+                selectedDay: _selectedDay,
+                todos: selectedTodos,
+                onCompletedChanged: (id, completed) async {
+                  await widget.store.updateTodoCompleted(id, completed);
+                },
+              ),
+            ],
           ),
-          const SizedBox(height: 8),
-          const Text(
-            '点击日历中的某一天，查看这一天有什么任务待办',
-            style: TextStyle(color: _muted, fontSize: 16),
-          ),
-          const SizedBox(height: 20),
-          _TaskCalendar(
-            visibleMonth: _visibleMonth,
-            selectedDay: _selectedDay,
-            todoCountForDay: (day) => widget.store.todosForDay(day).length,
-            onPreviousMonth: () => setState(() {
-              _visibleMonth = DateTime(
-                _visibleMonth.year,
-                _visibleMonth.month - 1,
-              );
-            }),
-            onNextMonth: () => setState(() {
-              _visibleMonth = DateTime(
-                _visibleMonth.year,
-                _visibleMonth.month + 1,
-              );
-            }),
-            onDaySelected: (day) => setState(() {
-              _selectedDay = DateUtils.dateOnly(day);
-              _visibleMonth = DateTime(day.year, day.month);
-            }),
-          ),
-          const SizedBox(height: 16),
-          _SelectedDayTodoCard(
-            selectedDay: _selectedDay,
-            todos: selectedTodos,
-            onCompletedChanged: (id, completed) async {
-              await widget.store.updateTodoCompleted(id, completed);
-            },
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 }
@@ -2762,6 +2761,7 @@ class _SelectedDayTodoCard extends StatelessWidget {
             else
               ...todos.map(
                 (todo) => _TodoTableRow(
+                  key: ValueKey(todo.id),
                   todo: todo,
                   onChanged: (value) =>
                       onCompletedChanged(todo.id, value ?? false),
@@ -2781,33 +2781,38 @@ class ReportPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final records = store.forThisWeek();
-    final report = _buildReport(records);
-    return SafeArea(
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 24, 20, 110),
-        children: [
-          const Text(
-            '周报',
-            style: TextStyle(fontSize: 32, fontWeight: FontWeight.w900),
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            '由本周记录自动整理，可复制后继续润色',
-            style: TextStyle(color: _muted, fontSize: 16),
-          ),
-          const SizedBox(height: 20),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(18),
-              child: SelectableText(
-                report,
-                style: const TextStyle(fontSize: 16, height: 1.65),
+    return AnimatedBuilder(
+      animation: store,
+      builder: (context, _) {
+        final records = store.forThisWeek();
+        final report = _buildReport(records);
+        return SafeArea(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(20, 24, 20, 110),
+            children: [
+              const Text(
+                '周报',
+                style: TextStyle(fontSize: 32, fontWeight: FontWeight.w900),
               ),
-            ),
+              const SizedBox(height: 8),
+              const Text(
+                '由本周记录自动整理，可复制后继续润色',
+                style: TextStyle(color: _muted, fontSize: 16),
+              ),
+              const SizedBox(height: 20),
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(18),
+                  child: SelectableText(
+                    report,
+                    style: const TextStyle(fontSize: 16, height: 1.65),
+                  ),
+                ),
+              ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -2840,45 +2845,50 @@ class ProfilePage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 24, 20, 110),
-        children: [
-          const Text(
-            '我的',
-            style: TextStyle(fontSize: 32, fontWeight: FontWeight.w900),
-          ),
-          const SizedBox(height: 20),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(18),
-              child: Column(
-                children: [
-                  _SettingsRow(
-                    icon: Icons.storage_outlined,
-                    title: '本地记录',
-                    detail: '${store.records.length} 条',
-                  ),
-                  const Divider(height: 28),
-                  _SettingsRow(
-                    icon: Icons.psychology_alt_outlined,
-                    title: '智能模型',
-                    detail: _deepSeekApiKey.isEmpty
-                        ? '未配置，使用本地拆分'
-                        : 'DeepSeek V4 Flash',
-                  ),
-                  const Divider(height: 28),
-                  const _SettingsRow(
-                    icon: Icons.verified_outlined,
-                    title: '版本',
-                    detail: 'MVP 0.1.0',
-                  ),
-                ],
+    return AnimatedBuilder(
+      animation: store,
+      builder: (context, _) {
+        return SafeArea(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(20, 24, 20, 110),
+            children: [
+              const Text(
+                '我的',
+                style: TextStyle(fontSize: 32, fontWeight: FontWeight.w900),
               ),
-            ),
+              const SizedBox(height: 20),
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(18),
+                  child: Column(
+                    children: [
+                      _SettingsRow(
+                        icon: Icons.storage_outlined,
+                        title: '本地记录',
+                        detail: '${store.records.length} 条',
+                      ),
+                      const Divider(height: 28),
+                      _SettingsRow(
+                        icon: Icons.psychology_alt_outlined,
+                        title: '智能模型',
+                        detail: _deepSeekApiKey.isEmpty
+                            ? '未配置，使用本地拆分'
+                            : 'DeepSeek V4 Flash',
+                      ),
+                      const Divider(height: 28),
+                      const _SettingsRow(
+                        icon: Icons.verified_outlined,
+                        title: '版本',
+                        detail: 'MVP 0.1.0',
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 }

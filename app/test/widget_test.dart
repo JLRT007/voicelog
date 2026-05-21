@@ -100,6 +100,26 @@ void main() {
     expect(store.todosForDay(DateTime.now()).single.completed, isTrue);
   });
 
+  testWidgets('home todo checkbox updates without flashing loading state', (
+    tester,
+  ) async {
+    final todo = DailyTodo.create(title: '稳定完成状态', scheduledAt: DateTime.now());
+    final store = LocalRecordStore.inMemory([], [todo]);
+
+    await tester.pumpWidget(VoiceLogApp(store: store));
+    await tester.pumpAndSettle();
+
+    expect(find.text('稳定完成状态'), findsOneWidget);
+    await tester.tap(find.byType(Checkbox).first);
+    await tester.pump();
+
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.text('稳定完成状态'), findsOneWidget);
+    expect(find.text('1/1'), findsOneWidget);
+    await tester.pumpAndSettle();
+    expect(store.todosForDay(DateTime.now()).single.completed, isTrue);
+  });
+
   testWidgets('overview tab shows calendar task overview', (tester) async {
     final store = LocalRecordStore.inMemory([], []);
 
@@ -155,6 +175,8 @@ void main() {
     await tester.tap(find.byType(Checkbox).first);
     await tester.pumpAndSettle();
 
+    expect(find.text('在总览页确认完成'), findsOneWidget);
+    expect(find.text('1/1'), findsOneWidget);
     expect(store.todosForDay(now).single.completed, isTrue);
   });
 
