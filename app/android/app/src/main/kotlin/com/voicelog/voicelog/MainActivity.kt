@@ -21,12 +21,14 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     companion object {
         private const val ERROR_SERVER_DISCONNECTED = 11
+        private const val REQUEST_RECORD_AUDIO = 1001
     }
 
     private var speechRecognizer: SpeechRecognizer? = null
     private var usingXiaomiFallback = false
     private var pendingRetryWithXiaomi = false
     private var retriedAfterBusy = false
+    private var pendingStartResult: MethodChannel.Result? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var speechChannel: MethodChannel
 
@@ -63,6 +65,15 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun startListening(result: MethodChannel.Result) {
+        if (needsRecordAudioPermission()) {
+            if (pendingStartResult != null) {
+                result.error("permission_request_active", "正在请求麦克风权限，请先处理系统弹窗", null)
+                return
+            }
+            pendingStartResult = result
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_RECORD_AUDIO)
+            return
+        }
         if (!isSpeechRecognitionAvailable()) {
             result.error("unavailable", "没有检测到可用的语音识别服务", null)
             return
@@ -119,6 +130,11 @@ class MainActivity : FlutterActivity() {
             SpeechRecognizer.createSpeechRecognizer(this)
         }
         speechRecognizer?.setRecognitionListener(voiceRecognitionListener())
+    }
+
+    private fun needsRecordAudioPermission(): Boolean {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
     }
 
     private fun recognizerIntent(): Intent {
@@ -336,7 +352,28 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        if (requestCode == REQUEST_RECORD_AUDIO) {
+            val result = pendingStartResult
+            pendingStartResult = null
+            if (result == null) return
+
+            if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+                startListening(result)
+            } else {
+                result.error("microphone_permission_denied", "请允许 VoiceLog 使用麦克风后再开始语音记录", null)
+            }
+            return
+        }
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+    }
+
     override fun onDestroy() {
+        pendingStartResult = null
         releaseRecognizer()
         super.onDestroy()
     }

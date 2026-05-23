@@ -1,6 +1,18 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:voicelog/main.dart';
+
+class FakeSplitter extends DeepSeekSplitter {
+  const FakeSplitter();
+
+  @override
+  Future<List<SplitDraft>> split(String text) async {
+    return [
+      SplitDraft(title: text, category: RecordCategory.next, progress: 0),
+    ];
+  }
+}
 
 void main() {
   testWidgets('VoiceLog renders the floating voice home screen', (
@@ -25,6 +37,231 @@ void main() {
     expect(RecordCategory.next.label, '后续计划');
     expect(find.text('下周计划'), findsNothing);
     expect(find.byIcon(Icons.mic_none_rounded), findsOneWidget);
+  });
+
+  testWidgets('voice button starts on press and stops on release', (
+    tester,
+  ) async {
+    final calls = <String>[];
+    const channel = MethodChannel('com.voicelog.voicelog/speech');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          calls.add(call.method);
+          if (call.method == 'isAvailable') {
+            return true;
+          }
+          return null;
+        });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    final store = LocalRecordStore.inMemory([]);
+
+    await tester.pumpWidget(VoiceLogApp(store: store));
+    await tester.pumpAndSettle();
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byIcon(Icons.mic_none_rounded)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(calls, containsAllInOrder(['isAvailable', 'startListening']));
+    expect(find.text('正在听你说...'), findsOneWidget);
+    expect(find.byIcon(Icons.stop_rounded), findsNothing);
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(calls.where((call) => call == 'stopListening'), isEmpty);
+
+    await gesture.up();
+    await tester.pump(const Duration(milliseconds: 1300));
+
+    expect(calls, contains('stopListening'));
+  });
+
+  testWidgets('voice button stops when press is cancelled', (tester) async {
+    final calls = <String>[];
+    const channel = MethodChannel('com.voicelog.voicelog/speech');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          calls.add(call.method);
+          if (call.method == 'isAvailable') {
+            return true;
+          }
+          return null;
+        });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    final store = LocalRecordStore.inMemory([]);
+
+    await tester.pumpWidget(VoiceLogApp(store: store));
+    await tester.pumpAndSettle();
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byIcon(Icons.mic_none_rounded)),
+    );
+    await tester.pumpAndSettle();
+    await gesture.cancel();
+    await tester.pump(const Duration(milliseconds: 1300));
+
+    expect(calls, containsAllInOrder(['isAvailable', 'startListening']));
+    expect(calls, contains('stopListening'));
+  });
+
+  testWidgets(
+    'voice split uses partial text after release without final result',
+    (tester) async {
+      final calls = <String>[];
+      const channel = MethodChannel('com.voicelog.voicelog/speech');
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            calls.add(call.method);
+            if (call.method == 'isAvailable') {
+              return true;
+            }
+            if (call.method == 'stopListening') {
+              await TestDefaultBinaryMessengerBinding
+                  .instance
+                  .defaultBinaryMessenger
+                  .handlePlatformMessage(
+                    'com.voicelog.voicelog/speech',
+                    channel.codec.encodeMethodCall(
+                      const MethodCall('onSpeechResult', {
+                        'text': '明天提交材料',
+                        'isFinal': false,
+                      }),
+                    ),
+                    (_) {},
+                  );
+            }
+            return null;
+          });
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null);
+      });
+
+      final store = LocalRecordStore.inMemory([], []);
+
+      await tester.pumpWidget(
+        VoiceLogApp(store: store, splitter: const FakeSplitter()),
+      );
+      await tester.pumpAndSettle();
+
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byIcon(Icons.mic_none_rounded)),
+      );
+      await tester.pumpAndSettle();
+      await gesture.up();
+      await tester.pump(const Duration(milliseconds: 1300));
+      await tester.pumpAndSettle();
+
+      expect(calls, contains('stopListening'));
+      expect(find.text('智能拆分记录'), findsOneWidget);
+      expect(find.text('明天提交材料'), findsWidgets);
+    },
+  );
+
+  testWidgets('voice split waits when done status arrives before result', (
+    tester,
+  ) async {
+    final calls = <String>[];
+    const channel = MethodChannel('com.voicelog.voicelog/speech');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          calls.add(call.method);
+          if (call.method == 'isAvailable') {
+            return true;
+          }
+          if (call.method == 'stopListening') {
+            await TestDefaultBinaryMessengerBinding
+                .instance
+                .defaultBinaryMessenger
+                .handlePlatformMessage(
+                  'com.voicelog.voicelog/speech',
+                  channel.codec.encodeMethodCall(
+                    const MethodCall('onSpeechStatus', {'status': 'done'}),
+                  ),
+                  (_) {},
+                );
+            await Future<void>.delayed(const Duration(milliseconds: 100));
+            await TestDefaultBinaryMessengerBinding
+                .instance
+                .defaultBinaryMessenger
+                .handlePlatformMessage(
+                  'com.voicelog.voicelog/speech',
+                  channel.codec.encodeMethodCall(
+                    const MethodCall('onSpeechResult', {
+                      'text': '后天开会',
+                      'isFinal': true,
+                    }),
+                  ),
+                  (_) {},
+                );
+          }
+          return null;
+        });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    final store = LocalRecordStore.inMemory([], []);
+
+    await tester.pumpWidget(
+      VoiceLogApp(store: store, splitter: const FakeSplitter()),
+    );
+    await tester.pumpAndSettle();
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byIcon(Icons.mic_none_rounded)),
+    );
+    await tester.pumpAndSettle();
+    await gesture.up();
+    await tester.pump(const Duration(milliseconds: 1400));
+    await tester.pumpAndSettle();
+
+    expect(calls, contains('stopListening'));
+    expect(find.text('智能拆分记录'), findsOneWidget);
+    expect(find.text('后天开会'), findsWidgets);
+  });
+
+  testWidgets('voice release without text shows empty recognition hint', (
+    tester,
+  ) async {
+    const channel = MethodChannel('com.voicelog.voicelog/speech');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          if (call.method == 'isAvailable') {
+            return true;
+          }
+          return null;
+        });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    final store = LocalRecordStore.inMemory([], []);
+
+    await tester.pumpWidget(
+      VoiceLogApp(store: store, splitter: const FakeSplitter()),
+    );
+    await tester.pumpAndSettle();
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byIcon(Icons.mic_none_rounded)),
+    );
+    await tester.pumpAndSettle();
+    await gesture.up();
+    await tester.pump(const Duration(milliseconds: 1300));
+    await tester.pump();
+
+    expect(find.text('智能拆分记录'), findsNothing);
+    expect(find.text('没有识别到内容，请按住后再说一遍。'), findsOneWidget);
   });
 
   testWidgets('todo card shows today and tomorrow groups', (tester) async {
@@ -88,19 +325,28 @@ void main() {
     expect(find.text('已经完成的旧事项'), findsNothing);
   });
 
-  testWidgets('todo checkbox marks an item as completed', (tester) async {
+  testWidgets('todo checkbox clears the item from the pending list', (
+    tester,
+  ) async {
     final todo = DailyTodo.create(title: '确认发布清单', scheduledAt: DateTime.now());
     final store = LocalRecordStore.inMemory([], [todo]);
 
     await tester.pumpWidget(VoiceLogApp(store: store));
     await tester.pumpAndSettle();
     await tester.tap(find.byType(Checkbox).first);
+    await tester.pump();
+
+    expect(find.text('确认发布清单'), findsOneWidget);
+
     await tester.pumpAndSettle();
 
+    expect(find.text('确认发布清单'), findsNothing);
+    final todoWindow = await store.todosForTodayAndTomorrow();
+    expect(todoWindow.totalCount, 0);
     expect(store.todosForDay(DateTime.now()).single.completed, isTrue);
   });
 
-  testWidgets('home todo checkbox updates without flashing loading state', (
+  testWidgets('home todo checkbox clears without flashing loading state', (
     tester,
   ) async {
     final todo = DailyTodo.create(title: '稳定完成状态', scheduledAt: DateTime.now());
@@ -115,10 +361,40 @@ void main() {
 
     expect(find.byType(CircularProgressIndicator), findsNothing);
     expect(find.text('稳定完成状态'), findsOneWidget);
-    expect(find.text('1/1'), findsOneWidget);
     await tester.pumpAndSettle();
+    expect(find.text('稳定完成状态'), findsNothing);
+    final todoWindow = await store.todosForTodayAndTomorrow();
+    expect(todoWindow.totalCount, 0);
     expect(store.todosForDay(DateTime.now()).single.completed, isTrue);
   });
+
+  testWidgets(
+    'home completion syncs to overview before dismiss animation ends',
+    (tester) async {
+      final todo = DailyTodo.create(
+        title: '立即同步完成',
+        scheduledAt: DateTime.now(),
+      );
+      final store = LocalRecordStore.inMemory([], [todo]);
+
+      await tester.pumpWidget(VoiceLogApp(store: store));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(Checkbox).first);
+      await tester.pump();
+
+      expect(store.todosForDay(DateTime.now()).single.completed, isTrue);
+
+      await tester.tap(find.text('总览'));
+      await tester.pumpAndSettle();
+      await tester.drag(find.byType(ListView), const Offset(0, -500));
+      await tester.pumpAndSettle();
+
+      expect(find.text('立即同步完成'), findsOneWidget);
+      expect(find.text('1/1'), findsOneWidget);
+      final checkbox = tester.widget<Checkbox>(find.byType(Checkbox).first);
+      expect(checkbox.value, isTrue);
+    },
+  );
 
   testWidgets('overview tab shows calendar task overview', (tester) async {
     final store = LocalRecordStore.inMemory([], []);
@@ -177,6 +453,8 @@ void main() {
 
     expect(find.text('在总览页确认完成'), findsOneWidget);
     expect(find.text('1/1'), findsOneWidget);
+    final checkbox = tester.widget<Checkbox>(find.byType(Checkbox).first);
+    expect(checkbox.value, isTrue);
     expect(store.todosForDay(now).single.completed, isTrue);
   });
 

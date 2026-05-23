@@ -26,9 +26,14 @@ void main() async {
 }
 
 class VoiceLogApp extends StatelessWidget {
-  const VoiceLogApp({super.key, required this.store});
+  const VoiceLogApp({
+    super.key,
+    required this.store,
+    DeepSeekSplitter? splitter,
+  }) : splitter = splitter ?? const DeepSeekSplitter();
 
   final LocalRecordStore store;
+  final DeepSeekSplitter splitter;
 
   @override
   Widget build(BuildContext context) {
@@ -57,7 +62,7 @@ class VoiceLogApp extends StatelessWidget {
           ),
         ),
       ),
-      home: VoiceLogHome(store: store),
+      home: VoiceLogHome(store: store, splitter: splitter),
     );
   }
 }
@@ -655,10 +660,17 @@ class LocalRecordStore extends ChangeNotifier {
     await _rollOverIncompleteTodos(today);
 
     final todayTodos = _todos
-        .where((todo) => DateUtils.isSameDay(todo.scheduledAt, today))
+        .where(
+          (todo) =>
+              !todo.completed && DateUtils.isSameDay(todo.scheduledAt, today),
+        )
         .toList();
     final tomorrowTodos = _todos
-        .where((todo) => DateUtils.isSameDay(todo.scheduledAt, tomorrow))
+        .where(
+          (todo) =>
+              !todo.completed &&
+              DateUtils.isSameDay(todo.scheduledAt, tomorrow),
+        )
         .toList();
     _sortTodos(todayTodos);
     _sortTodos(tomorrowTodos);
@@ -920,22 +932,22 @@ class DeepSeekSplitter {
 }
 
 class VoiceLogHome extends StatefulWidget {
-  const VoiceLogHome({super.key, required this.store});
+  const VoiceLogHome({super.key, required this.store, required this.splitter});
 
   final LocalRecordStore store;
+  final DeepSeekSplitter splitter;
 
   @override
   State<VoiceLogHome> createState() => _VoiceLogHomeState();
 }
 
 class _VoiceLogHomeState extends State<VoiceLogHome> {
-  final _splitter = const DeepSeekSplitter();
   int _tabIndex = 0;
 
   @override
   Widget build(BuildContext context) {
     final pages = [
-      RecordPage(store: widget.store, splitter: _splitter),
+      RecordPage(store: widget.store, splitter: widget.splitter),
       OverviewPage(store: widget.store),
       ReportPage(store: widget.store),
       ProfilePage(store: widget.store),
@@ -995,6 +1007,9 @@ class _RecordPageState extends State<RecordPage> {
   bool _isRecording = false;
   bool _isSplitting = false;
   bool _isConsumingVoiceText = false;
+  bool _isVoicePressActive = false;
+  bool _isStartingVoice = false;
+  bool _isStoppingVoice = false;
   String _recognizedText = '';
   String _speechStatus = '';
   TodoWindow _todoWindow = const TodoWindow(today: [], tomorrow: []);
@@ -1040,6 +1055,7 @@ class _RecordPageState extends State<RecordPage> {
                       todoWindow: _todoWindow,
                       isLoading: _isTodoWindowLoading,
                       onCompletedChanged: _updateTodoCompleted,
+                      onDismissCompleted: () => unawaited(_loadTodoWindow()),
                       onAdd: _showAddTodoDialog,
                     ),
                     _CategoryChips(
@@ -1063,7 +1079,8 @@ class _RecordPageState extends State<RecordPage> {
               isRecording: _isRecording,
               isBusy: _isSplitting,
               statusText: _speechStatus,
-              onTap: _toggleVoice,
+              onPressStart: _startVoiceHold,
+              onPressEnd: _stopVoiceHold,
             ),
           ),
         ],
@@ -1083,6 +1100,7 @@ class _RecordPageState extends State<RecordPage> {
 
   Future<void> _updateTodoCompleted(String id, bool completed) async {
     await widget.store.updateTodoCompleted(id, completed);
+    if (completed) return;
     await _loadTodoWindow();
   }
 
@@ -1109,15 +1127,18 @@ class _RecordPageState extends State<RecordPage> {
     await _showSplitSheet(text, drafts);
   }
 
-  Future<void> _toggleVoice() async {
-    if (_isRecording) {
-      await _stopVoiceAndUseText();
+  Future<void> _startVoiceHold() async {
+    if (_isRecording || _isSplitting || _isStartingVoice) {
       return;
     }
+    _isVoicePressActive = true;
 
     try {
+      _isStartingVoice = true;
       final available = await _voice.isAvailable();
       if (!available) {
+        _isStartingVoice = false;
+        _isVoicePressActive = false;
         _showVoiceMessage('没有检测到系统语音识别服务。你的小米 13 若仍显示已安装小爱识别服务，请重启系统语音服务后再试。');
         return;
       }
@@ -1128,7 +1149,13 @@ class _RecordPageState extends State<RecordPage> {
         _recognizedText = '';
       });
       await _voice.startListening();
+      _isStartingVoice = false;
+      if (!_isVoicePressActive) {
+        await _stopVoiceHold();
+      }
     } on PlatformException catch (error) {
+      _isStartingVoice = false;
+      _isVoicePressActive = false;
       if (!mounted) return;
       setState(() {
         _isRecording = false;
@@ -1146,13 +1173,38 @@ class _RecordPageState extends State<RecordPage> {
     }
   }
 
+  Future<void> _stopVoiceHold() async {
+    if (!_isVoicePressActive && !_isStartingVoice && !_isRecording) {
+      return;
+    }
+    _isVoicePressActive = false;
+    if (_isStartingVoice) {
+      return;
+    }
+    await _stopVoiceAndUseText();
+  }
+
   Future<void> _stopVoiceAndUseText() async {
+    if (_isStoppingVoice) {
+      return;
+    }
+    _isStoppingVoice = true;
     await _voice.stopListening();
-    await Future<void>.delayed(const Duration(milliseconds: 900));
+    if (mounted) {
+      setState(() => _speechStatus = '正在整理...');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 1200));
     if (!mounted) return;
     setState(() {
       _isRecording = false;
     });
+    if (_recognizedText.trim().isEmpty) {
+      _isStoppingVoice = false;
+      _isConsumingVoiceText = false;
+      setState(() => _speechStatus = '');
+      _showVoiceMessage('没有识别到内容，请按住后再说一遍。');
+      return;
+    }
     await _consumeRecognizedText();
   }
 
@@ -1162,7 +1214,7 @@ class _RecordPageState extends State<RecordPage> {
       _recognizedText = result.text.trim();
       _speechStatus = result.isFinal ? '识别完成' : '识别中';
     });
-    if (result.isFinal) {
+    if (result.isFinal && !_isVoicePressActive && !_isStoppingVoice) {
       unawaited(_consumeRecognizedText(stopListening: true));
     }
   }
@@ -1171,6 +1223,7 @@ class _RecordPageState extends State<RecordPage> {
     if (_isConsumingVoiceText) return;
     final text = _recognizedText.trim();
     if (text.isEmpty) {
+      _isStoppingVoice = false;
       if (mounted) {
         setState(() => _speechStatus = '');
       }
@@ -1193,6 +1246,7 @@ class _RecordPageState extends State<RecordPage> {
       _speechStatus = '';
       _isConsumingVoiceText = false;
     });
+    _isStoppingVoice = false;
   }
 
   void _handleVoiceStatus(String status) {
@@ -1216,9 +1270,6 @@ class _RecordPageState extends State<RecordPage> {
           break;
       }
     });
-    if (status == 'done') {
-      unawaited(_consumeRecognizedText());
-    }
   }
 
   void _handleVoiceError(VoiceRecognitionError error) {
@@ -1231,6 +1282,10 @@ class _RecordPageState extends State<RecordPage> {
       _isRecording = false;
       _speechStatus = '';
     });
+    _isVoicePressActive = false;
+    _isStartingVoice = false;
+    _isStoppingVoice = false;
+    _isConsumingVoiceText = false;
     final hint = error.permanent
         ? '系统语音服务已被调用但返回失败，可重试或后续接入云端 ASR。'
         : '识别被中断，请再试一次。';
@@ -1410,12 +1465,14 @@ class _TodayTodoTable extends StatelessWidget {
     required this.todoWindow,
     required this.isLoading,
     required this.onCompletedChanged,
+    required this.onDismissCompleted,
     required this.onAdd,
   });
 
   final TodoWindow todoWindow;
   final bool isLoading;
   final Future<void> Function(String id, bool completed) onCompletedChanged;
+  final VoidCallback onDismissCompleted;
   final VoidCallback onAdd;
 
   @override
@@ -1435,7 +1492,7 @@ class _TodayTodoTable extends StatelessWidget {
                   ),
                 ),
                 Text(
-                  '${todoWindow.doneCount}/${todoWindow.totalCount}',
+                  '${todoWindow.totalCount}',
                   style: const TextStyle(
                     color: _muted,
                     fontWeight: FontWeight.w800,
@@ -1483,12 +1540,14 @@ class _TodayTodoTable extends StatelessWidget {
                   label: '今天',
                   todos: todoWindow.today,
                   onCompletedChanged: onCompletedChanged,
+                  onDismissCompleted: onDismissCompleted,
                 ),
               if (todoWindow.tomorrow.isNotEmpty)
                 _TodoDaySection(
                   label: '明天',
                   todos: todoWindow.tomorrow,
                   onCompletedChanged: onCompletedChanged,
+                  onDismissCompleted: onDismissCompleted,
                 ),
             ],
           ],
@@ -1503,11 +1562,13 @@ class _TodoDaySection extends StatelessWidget {
     required this.label,
     required this.todos,
     required this.onCompletedChanged,
+    required this.onDismissCompleted,
   });
 
   final String label;
   final List<DailyTodo> todos;
   final Future<void> Function(String id, bool completed) onCompletedChanged;
+  final VoidCallback onDismissCompleted;
 
   @override
   Widget build(BuildContext context) {
@@ -1528,7 +1589,9 @@ class _TodoDaySection extends StatelessWidget {
             return _TodoTableRow(
               key: ValueKey(todo.id),
               todo: todo,
+              dismissOnComplete: true,
               onChanged: (value) => onCompletedChanged(todo.id, value ?? false),
+              onDismissCompleted: onDismissCompleted,
             );
           }),
         ],
@@ -1575,17 +1638,29 @@ class _TodoHeaderRow extends StatelessWidget {
 }
 
 class _TodoTableRow extends StatefulWidget {
-  const _TodoTableRow({super.key, required this.todo, required this.onChanged});
+  const _TodoTableRow({
+    super.key,
+    required this.todo,
+    required this.onChanged,
+    this.dismissOnComplete = false,
+    this.onDismissCompleted,
+  });
 
   final DailyTodo todo;
+  final bool dismissOnComplete;
   final ValueChanged<bool?> onChanged;
+  final VoidCallback? onDismissCompleted;
 
   @override
   State<_TodoTableRow> createState() => _TodoTableRowState();
 }
 
 class _TodoTableRowState extends State<_TodoTableRow> {
+  static const _dismissDuration = Duration(milliseconds: 260);
+
   late bool _checked;
+  bool _isDismissing = false;
+  bool _didSubmitDismiss = false;
 
   @override
   void initState() {
@@ -1599,6 +1674,10 @@ class _TodoTableRowState extends State<_TodoTableRow> {
     if (oldWidget.todo.completed != widget.todo.completed) {
       _checked = widget.todo.completed;
     }
+    if (oldWidget.todo.id != widget.todo.id) {
+      _isDismissing = false;
+      _didSubmitDismiss = false;
+    }
   }
 
   @override
@@ -1609,7 +1688,7 @@ class _TodoTableRowState extends State<_TodoTableRow> {
       fontWeight: FontWeight.w800,
       decoration: _checked ? TextDecoration.lineThrough : null,
     );
-    return DecoratedBox(
+    final row = DecoratedBox(
       decoration: const BoxDecoration(
         border: Border(bottom: BorderSide(color: Color(0xFFF0F2F4))),
       ),
@@ -1633,11 +1712,7 @@ class _TodoTableRowState extends State<_TodoTableRow> {
               width: 58,
               child: Checkbox(
                 value: _checked,
-                onChanged: (value) {
-                  final next = value ?? false;
-                  setState(() => _checked = next);
-                  widget.onChanged(next);
-                },
+                onChanged: _isDismissing ? null : _handleChanged,
                 activeColor: _brandGreen,
                 visualDensity: VisualDensity.compact,
                 shape: RoundedRectangleBorder(
@@ -1649,6 +1724,41 @@ class _TodoTableRowState extends State<_TodoTableRow> {
         ),
       ),
     );
+
+    return TweenAnimationBuilder<double>(
+      duration: _dismissDuration,
+      curve: Curves.easeInOut,
+      tween: Tween<double>(begin: 1, end: _isDismissing ? 0 : 1),
+      onEnd: () {
+        if (_isDismissing && !_didSubmitDismiss) {
+          _didSubmitDismiss = true;
+          widget.onDismissCompleted?.call();
+        }
+      },
+      builder: (context, value, child) {
+        return ClipRect(
+          child: Align(
+            alignment: Alignment.topCenter,
+            heightFactor: value,
+            child: Opacity(opacity: value, child: child),
+          ),
+        );
+      },
+      child: row,
+    );
+  }
+
+  void _handleChanged(bool? value) {
+    final next = value ?? false;
+    setState(() {
+      _checked = next;
+      _isDismissing = widget.dismissOnComplete && next;
+      if (!_isDismissing) {
+        _didSubmitDismiss = false;
+      }
+    });
+
+    widget.onChanged(next);
   }
 }
 
@@ -2102,13 +2212,15 @@ class _VoiceDock extends StatelessWidget {
     required this.isRecording,
     required this.isBusy,
     required this.statusText,
-    required this.onTap,
+    required this.onPressStart,
+    required this.onPressEnd,
   });
 
   final bool isRecording;
   final bool isBusy;
   final String statusText;
-  final VoidCallback onTap;
+  final VoidCallback onPressStart;
+  final VoidCallback onPressEnd;
 
   @override
   Widget build(BuildContext context) {
@@ -2122,51 +2234,55 @@ class _VoiceDock extends StatelessWidget {
           ),
           const SizedBox(height: 8),
         ],
-        AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          width: isRecording ? 210 : 76,
-          height: 76,
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(40),
-            boxShadow: [
-              BoxShadow(
-                color: _brandGreen.withValues(alpha: isRecording ? 0.2 : 0.12),
-                blurRadius: 24,
-                offset: const Offset(0, 12),
-              ),
-            ],
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              if (isRecording) const _WaveBars(),
-              GestureDetector(
-                onTap: isBusy ? null : onTap,
-                child: CircleAvatar(
-                  radius: 28,
-                  backgroundColor: isBusy ? _muted : _brandGreen,
-                  foregroundColor: Colors.white,
-                  child: isBusy
-                      ? const SizedBox(
-                          width: 24,
-                          height: 24,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2.4,
-                            color: Colors.white,
-                          ),
-                        )
-                      : Icon(
-                          isRecording
-                              ? Icons.stop_rounded
-                              : Icons.mic_none_rounded,
-                          size: 34,
-                        ),
+        Listener(
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: isBusy ? null : (_) => onPressStart(),
+          onPointerUp: isBusy ? null : (_) => onPressEnd(),
+          onPointerCancel: isBusy ? null : (_) => onPressEnd(),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            width: isRecording ? 310 : 76,
+            height: 76,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(40),
+              boxShadow: [
+                BoxShadow(
+                  color: _brandGreen.withValues(
+                    alpha: isRecording ? 0.2 : 0.12,
+                  ),
+                  blurRadius: 24,
+                  offset: const Offset(0, 12),
                 ),
+              ],
+            ),
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (isRecording) const _WaveBars(),
+                  CircleAvatar(
+                    radius: 28,
+                    backgroundColor: isBusy ? _muted : _brandGreen,
+                    foregroundColor: Colors.white,
+                    child: isBusy
+                        ? const SizedBox(
+                            width: 24,
+                            height: 24,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2.4,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Icon(Icons.mic_none_rounded, size: 34),
+                  ),
+                  if (isRecording) const _WaveBars(),
+                ],
               ),
-              if (isRecording) const _WaveBars(),
-            ],
+            ),
           ),
         ),
       ],
@@ -2180,6 +2296,7 @@ class _WaveBars extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Row(
+      mainAxisSize: MainAxisSize.min,
       children: List.generate(4, (index) {
         return Container(
           width: 5,
